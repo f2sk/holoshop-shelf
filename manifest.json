@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Hololive Digital Library Organizer",
+  "version": "1.0.0",
+  "description": "ホロライブショップのデジタルコンテンツライブラリーを整理・検索可能にする",
+  "content_scripts": [
+    {
+      "matches": ["https://shop.hololivepro.com/apps/downloads/orders/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {}
+}
