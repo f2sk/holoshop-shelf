@@ -133,6 +133,7 @@
             infoMap[p.title] = {
               publishedAt: p.published_at || "",
               members,
+              handle: p.handle || "",
             };
             remaining.delete(p.title);
           }
@@ -225,24 +226,250 @@
         item.memberClean = info.members.join("、");
         item.member = info.members.join("、");
       }
+
+      if (info.handle) {
+        item.productUrl = `${window.location.origin}/products/${info.handle}`;
+      }
     }
     return items;
   }
 
+  // --- トラック取得 ---
+
+  async function fetchTracks(detailUrl) {
+    const resp = await fetch(detailUrl, { credentials: "include" });
+    if (!resp.ok) return [];
+    const html = await resp.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const items = doc.querySelectorAll(".sky-pilot-list-item");
+    return Array.from(items)
+      .map((item) => {
+        const heading = item.querySelector(".sky-pilot-file-heading");
+        const audio = item.querySelector("audio");
+        const ext = item.querySelector("[class*='sky-pilot-file-extension']");
+        const isAudio = ext && ext.className.includes("wav") || ext && ext.className.includes("mp3");
+        if (!isAudio || !audio) return null;
+
+        let src = audio.getAttribute("src") || "";
+        if (!src) {
+          const source = audio.querySelector("source");
+          if (source) src = source.getAttribute("src") || "";
+        }
+
+        return {
+          title: heading ? heading.textContent.trim() : "",
+          src,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  // --- オーバーレイプレイヤー ---
+
+  const player = {
+    audio: null,
+    tracks: [],
+    currentIndex: -1,
+    bar: null,
+    els: {},
+    seekDragging: false,
+  };
+
+  function fmtTime(sec) {
+    if (!sec || !isFinite(sec)) return "00:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  function createPlayerBar() {
+    const bar = document.createElement("div");
+    bar.id = "hlo-player";
+    bar.style.display = "none";
+
+    bar.innerHTML = `
+      <button class="hlo-player-close" title="閉じる">✕</button>
+      <div class="hlo-player-title"></div>
+      <div class="hlo-player-seek-row">
+        <span class="hlo-player-time hlo-player-cur">00:00</span>
+        <input type="range" class="hlo-player-seek" min="0" max="1000" value="0">
+        <span class="hlo-player-time hlo-player-dur">00:00</span>
+      </div>
+      <div class="hlo-player-btn-row">
+        <div class="hlo-player-left"></div>
+        <div class="hlo-player-center">
+          <button class="hlo-player-btn hlo-player-prev">⏮</button>
+          <button class="hlo-player-btn hlo-player-toggle">▶</button>
+          <button class="hlo-player-btn hlo-player-next">⏭</button>
+        </div>
+        <div class="hlo-player-right">
+          <span class="hlo-player-vol-icon">🔊</span>
+          <input type="range" class="hlo-player-vol" min="0" max="100" value="80">
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(bar);
+    player.bar = bar;
+    player.els = {
+      title: bar.querySelector(".hlo-player-title"),
+      cur: bar.querySelector(".hlo-player-cur"),
+      dur: bar.querySelector(".hlo-player-dur"),
+      seek: bar.querySelector(".hlo-player-seek"),
+      toggle: bar.querySelector(".hlo-player-toggle"),
+      prev: bar.querySelector(".hlo-player-prev"),
+      next: bar.querySelector(".hlo-player-next"),
+      vol: bar.querySelector(".hlo-player-vol"),
+      close: bar.querySelector(".hlo-player-close"),
+    };
+
+    player.els.close.addEventListener("click", () => {
+      if (player.audio) {
+        player.audio.pause();
+        player.audio = null;
+      }
+      player.currentIndex = -1;
+      player.tracks = [];
+      bar.style.display = "none";
+      player.els.toggle.textContent = "▶";
+      syncTrackHighlight();
+    });
+
+    player.els.toggle.addEventListener("click", () => {
+      if (!player.audio) return;
+      if (player.audio.paused) {
+        player.audio.play();
+        player.els.toggle.textContent = "⏸";
+      } else {
+        player.audio.pause();
+        player.els.toggle.textContent = "▶";
+      }
+      syncTrackHighlight();
+    });
+
+    player.els.prev.addEventListener("click", () => {
+      if (player.currentIndex > 0) playTrackAt(player.currentIndex - 1);
+    });
+
+    player.els.next.addEventListener("click", () => {
+      if (player.currentIndex < player.tracks.length - 1)
+        playTrackAt(player.currentIndex + 1);
+    });
+
+    player.els.seek.addEventListener("mousedown", () => { player.seekDragging = true; });
+    player.els.seek.addEventListener("input", () => {
+      if (player.audio && player.audio.duration) {
+        player.audio.currentTime = (player.els.seek.value / 1000) * player.audio.duration;
+        player.els.cur.textContent = fmtTime(player.audio.currentTime);
+      }
+    });
+    player.els.seek.addEventListener("mouseup", () => { player.seekDragging = false; });
+    player.els.seek.addEventListener("touchend", () => { player.seekDragging = false; });
+
+    player.els.vol.addEventListener("input", () => {
+      if (player.audio) player.audio.volume = player.els.vol.value / 100;
+    });
+
+    return bar;
+  }
+
+  function playTrackAt(index) {
+    if (index < 0 || index >= player.tracks.length) return;
+    if (player.audio) {
+      player.audio.pause();
+      player.audio = null;
+    }
+
+    player.currentIndex = index;
+    const track = player.tracks[index];
+    player.els.title.textContent = track.title;
+
+    const audio = new Audio(track.src);
+    audio.volume = player.els.vol.value / 100;
+    player.audio = audio;
+
+    audio.addEventListener("loadedmetadata", () => {
+      player.els.dur.textContent = fmtTime(audio.duration);
+    });
+
+    audio.addEventListener("timeupdate", () => {
+      if (!player.seekDragging && audio.duration) {
+        player.els.seek.value = Math.floor((audio.currentTime / audio.duration) * 1000);
+        player.els.cur.textContent = fmtTime(audio.currentTime);
+      }
+    });
+
+    audio.addEventListener("ended", () => {
+      player.els.toggle.textContent = "▶";
+      player.els.seek.value = 0;
+      player.els.cur.textContent = "00:00";
+      syncTrackHighlight();
+    });
+
+    audio.play();
+    player.els.toggle.textContent = "⏸";
+    player.bar.style.display = "";
+    syncTrackHighlight();
+  }
+
+  function loadTracksAndPlay(tracks, index) {
+    player.tracks = tracks;
+    playTrackAt(index);
+  }
+
+  function syncTrackHighlight() {
+    document.querySelectorAll(".hlo-track").forEach((row) => {
+      row.classList.remove("hlo-track-active");
+    });
+    const activeRow = document.querySelector(`.hlo-track[data-track-idx="${player.currentIndex}"]`);
+    if (activeRow && player.audio && !player.audio.paused) {
+      activeRow.classList.add("hlo-track-active");
+    }
+  }
+
   // --- UI ---
 
-  function createCard(item, onNavigate) {
-    const a = document.createElement("a");
-    a.className = "hlo-card";
-    a.href = item.href;
-    a.addEventListener("click", onNavigate);
+  function createCard(item) {
+    const card = document.createElement("div");
+    card.className = "hlo-card";
+
+    // サムネイル部分（クリックでトラック展開）
+    const thumbWrap = document.createElement("div");
+    thumbWrap.className = "hlo-card-thumb-wrap";
+    thumbWrap.style.cursor = "pointer";
 
     const img = document.createElement("img");
     img.className = "hlo-card-thumb";
     img.src = item.thumb;
     img.alt = item.event;
     img.loading = "lazy";
-    a.appendChild(img);
+    thumbWrap.appendChild(img);
+
+    // 右上リンクアイコン
+    const icons = document.createElement("div");
+    icons.className = "hlo-card-icons";
+
+    if (item.productUrl) {
+      const shopLink = document.createElement("a");
+      shopLink.className = "hlo-card-icon";
+      shopLink.href = item.productUrl;
+      shopLink.target = "_blank";
+      shopLink.title = "商品ページ";
+      shopLink.textContent = "🛒";
+      shopLink.addEventListener("click", (e) => e.stopPropagation());
+      icons.appendChild(shopLink);
+    }
+
+    const dlLink = document.createElement("a");
+    dlLink.className = "hlo-card-icon";
+    dlLink.href = item.href;
+    dlLink.title = "再生・ダウンロードページ";
+    dlLink.textContent = "📥";
+    dlLink.addEventListener("click", (e) => e.stopPropagation());
+    icons.appendChild(dlLink);
+
+    thumbWrap.appendChild(icons);
+    card.appendChild(thumbWrap);
 
     const body = document.createElement("div");
     body.className = "hlo-card-body";
@@ -269,11 +496,77 @@
       body.appendChild(yearEl);
     }
 
-    a.appendChild(body);
-    return a;
+    card.appendChild(body);
+
+    // トラック展開エリア
+    const trackList = document.createElement("div");
+    trackList.className = "hlo-tracks";
+    trackList.style.display = "none";
+    card.appendChild(trackList);
+
+    let tracksLoaded = false;
+    let cardTracks = [];
+
+    thumbWrap.addEventListener("click", async () => {
+      if (trackList.style.display !== "none") {
+        trackList.style.display = "none";
+        return;
+      }
+
+      if (!tracksLoaded) {
+        trackList.innerHTML = '<div class="hlo-tracks-loading">読み込み中...</div>';
+        trackList.style.display = "";
+        const detailUrl = item.href.startsWith("http")
+          ? item.href
+          : window.location.origin + item.href;
+        cardTracks = await fetchTracks(detailUrl);
+        trackList.innerHTML = "";
+
+        if (cardTracks.length === 0) {
+          trackList.innerHTML = '<div class="hlo-tracks-loading">トラックが見つかりません</div>';
+          return;
+        }
+
+        for (let i = 0; i < cardTracks.length; i++) {
+          const track = cardTracks[i];
+          const row = document.createElement("div");
+          row.className = "hlo-track";
+          row.setAttribute("data-track-idx", String(i));
+
+          const playBtn = document.createElement("button");
+          playBtn.className = "hlo-track-play";
+          playBtn.textContent = "▶";
+
+          const title = document.createElement("span");
+          title.className = "hlo-track-title";
+          title.textContent = track.title;
+
+          const idx = i;
+          row.addEventListener("click", (e) => {
+            e.stopPropagation();
+            document.querySelectorAll(".hlo-track").forEach((r) => r.removeAttribute("data-track-idx"));
+            const rows = trackList.querySelectorAll(".hlo-track");
+            rows.forEach((r, j) => r.setAttribute("data-track-idx", String(j)));
+            loadTracksAndPlay(cardTracks, idx);
+          });
+
+          row.appendChild(playBtn);
+          row.appendChild(title);
+          trackList.appendChild(row);
+        }
+
+        tracksLoaded = true;
+      } else {
+        trackList.style.display = "";
+      }
+    });
+
+    return card;
   }
 
   function buildUI(allItems) {
+    if (!player.bar) createPlayerBar();
+
     container.style.display = "none";
     const pagination = document.querySelector(".sky-pilot-pagination");
     if (pagination) pagination.style.display = "none";
@@ -415,15 +708,6 @@
 
     container.parentNode.insertBefore(wrapper, container);
 
-    // カードクリック時に状態を保存
-    function onCardNavigate() {
-      saveNavState({
-        member: memberFilter.value,
-        search: search.value,
-        sort: sortAsc ? "date-asc" : "date-desc",
-      });
-    }
-
     function render() {
       const memberVal = memberFilter.value;
       const query = search.value.toLowerCase();
@@ -451,7 +735,7 @@
 
       grid.innerHTML = "";
       for (const item of filtered) {
-        grid.appendChild(createCard(item, onCardNavigate));
+        grid.appendChild(createCard(item));
       }
 
       count.textContent = `${filtered.length} / ${allItems.length} 件`;
