@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Hololive Digital Library Organizer",
+  "name": "holoshop-shelf",
   "version": "1.0.0",
   "description": "ホロライブショップのデジタルコンテンツライブラリーを整理・検索可能にする",
   "content_scripts": [

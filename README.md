@@ -1,8 +1,8 @@
-# Hololive Digital Library Organizer
+# holoshop-shelf
 
 ホロライブオフィシャルショップで購入したデジタルコンテンツ（ボイス・ASMR・デジタルメッセージボード等）のライブラリーページを、検索・フィルタ・ソート可能なカード表示に変換する Chrome 拡張機能です。
 
-> **注意**: これはファン（[@f2sk](https://x.com/f2sk)）が個人的に作成した非公式ツールです。ホロライブプロダクション様およびカバー株式会社様とは一切関係ありません。本拡張に関するお問い合わせを公式に行わないでください。不具合や要望は [GitHub Issues](https://github.com/f2sk/holo-library-ext/issues) までお願いします。
+> **注意**: これはファン（[@f2sk](https://x.com/f2sk)）が個人的に作成した非公式ツールです。ホロライブプロダクション様およびカバー株式会社様とは一切関係ありません。本拡張に関するお問い合わせを公式に行わないでください。不具合や要望は [GitHub Issues](https://github.com/f2sk/holoshop-shelf/issues) までお願いします。
 
 ## こんな人向け
 
