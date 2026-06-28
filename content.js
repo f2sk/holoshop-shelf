@@ -93,7 +93,8 @@
         allItems = allItems.concat(pageItems);
         if (onProgress) onProgress(pageNum, allItems.length);
         nextUrl = getNextPageUrl(doc);
-      } catch {
+      } catch (e) {
+        console.error("[holoshop-shelf] ライブラリページ取得失敗:", e);
         break;
       }
     }
@@ -140,7 +141,8 @@
         }
 
         page++;
-      } catch {
+      } catch (e) {
+        console.error("[holoshop-shelf] 商品情報取得失敗:", e);
         break;
       }
     }
@@ -153,7 +155,8 @@
     try {
       const data = localStorage.getItem(CACHE_KEY);
       return data ? JSON.parse(data) : null;
-    } catch {
+    } catch (e) {
+      console.warn("[holoshop-shelf] キャッシュ読み込み失敗:", e);
       return null;
     }
   }
@@ -189,7 +192,8 @@
       const data = sessionStorage.getItem(NAV_STATE_KEY);
       sessionStorage.removeItem(NAV_STATE_KEY);
       return data ? JSON.parse(data) : null;
-    } catch {
+    } catch (e) {
+      console.warn("[holoshop-shelf] ナビ状態復元失敗:", e);
       return null;
     }
   }
@@ -236,13 +240,19 @@
 
   // --- トラック取得 ---
 
+  const trackCache = new Map();
+
   async function fetchTracks(detailUrl) {
+    if (trackCache.has(detailUrl)) return trackCache.get(detailUrl);
     const resp = await fetch(detailUrl, { credentials: "include" });
-    if (!resp.ok) return [];
+    if (!resp.ok) {
+      console.error("[holoshop-shelf] トラック取得失敗:", resp.status, detailUrl);
+      return [];
+    }
     const html = await resp.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
     const items = doc.querySelectorAll(".sky-pilot-list-item");
-    return Array.from(items)
+    const result = Array.from(items)
       .map((item) => {
         const heading = item.querySelector(".sky-pilot-file-heading");
         const audio = item.querySelector("audio");
@@ -262,6 +272,8 @@
         };
       })
       .filter(Boolean);
+    trackCache.set(detailUrl, result);
+    return result;
   }
 
   // --- オーバーレイプレイヤー ---
@@ -273,6 +285,10 @@
     bar: null,
     els: {},
     seekDragging: false,
+    currentRow: null,
+    activeRow: null,
+    trackRows: [],
+    currentCard: null,
   };
 
   function fmtTime(sec) {
@@ -326,10 +342,15 @@
     player.els.close.addEventListener("click", () => {
       if (player.audio) {
         player.audio.pause();
+        player.audio.src = "";
+        player.audio.load();
         player.audio = null;
       }
       player.currentIndex = -1;
       player.tracks = [];
+      player.trackRows = [];
+      player.currentRow = null;
+      player.currentCard = null;
       bar.style.display = "none";
       player.els.toggle.textContent = "▶";
       syncTrackHighlight();
@@ -377,7 +398,12 @@
     if (index < 0 || index >= player.tracks.length) return;
     if (player.audio) {
       player.audio.pause();
+      player.audio.src = "";
+      player.audio.load();
       player.audio = null;
+    }
+    if (player.trackRows[index]) {
+      player.currentRow = player.trackRows[index];
     }
 
     player.currentIndex = index;
@@ -412,18 +438,26 @@
     syncTrackHighlight();
   }
 
-  function loadTracksAndPlay(tracks, index) {
+  function loadTracksAndPlay(tracks, index, rows) {
     player.tracks = tracks;
+    player.trackRows = rows || [];
     playTrackAt(index);
   }
 
   function syncTrackHighlight() {
-    document.querySelectorAll(".hlo-track").forEach((row) => {
-      row.classList.remove("hlo-track-active");
-    });
-    const activeRow = document.querySelector(`.hlo-track[data-track-idx="${player.currentIndex}"]`);
-    if (activeRow && player.audio && !player.audio.paused) {
-      activeRow.classList.add("hlo-track-active");
+    if (player.activeRow) {
+      player.activeRow.classList.remove("hlo-track-active");
+      player.activeRow = null;
+    }
+    if (player.currentCard) {
+      player.currentCard.classList.remove("hlo-card-playing");
+    }
+    if (player.currentRow && player.audio && !player.audio.paused) {
+      player.currentRow.classList.add("hlo-track-active");
+      player.activeRow = player.currentRow;
+    }
+    if (player.currentCard && player.audio && !player.audio.paused) {
+      player.currentCard.classList.add("hlo-card-playing");
     }
   }
 
@@ -527,11 +561,11 @@
           return;
         }
 
+        const rows = [];
         for (let i = 0; i < cardTracks.length; i++) {
           const track = cardTracks[i];
           const row = document.createElement("div");
           row.className = "hlo-track";
-          row.setAttribute("data-track-idx", String(i));
 
           const playBtn = document.createElement("button");
           playBtn.className = "hlo-track-play";
@@ -544,15 +578,15 @@
           const idx = i;
           row.addEventListener("click", (e) => {
             e.stopPropagation();
-            document.querySelectorAll(".hlo-track").forEach((r) => r.removeAttribute("data-track-idx"));
-            const rows = trackList.querySelectorAll(".hlo-track");
-            rows.forEach((r, j) => r.setAttribute("data-track-idx", String(j)));
-            loadTracksAndPlay(cardTracks, idx);
+            player.currentRow = row;
+            player.currentCard = card;
+            loadTracksAndPlay(cardTracks, idx, rows);
           });
 
           row.appendChild(playBtn);
           row.appendChild(title);
           trackList.appendChild(row);
+          rows.push(row);
         }
 
         tracksLoaded = true;
@@ -712,7 +746,7 @@
       const memberVal = memberFilter.value;
       const query = search.value.toLowerCase();
 
-      let filtered = allItems;
+      let filtered = [...allItems];
 
       if (memberVal) {
         filtered = filtered.filter((item) => item.memberClean.includes(memberVal));

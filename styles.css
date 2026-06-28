@@ -115,6 +115,11 @@
   transform: translateY(-2px);
 }
 
+.hlo-card-playing {
+  border-color: #35b5c0;
+  box-shadow: 0 0 0 2px rgba(53, 181, 192, 0.4);
+}
+
 .hlo-card-thumb {
   width: 100%;
   aspect-ratio: 1 / 1;
