@@ -2,7 +2,8 @@
  * 一括ダウンロードのキュー管理
  *
  * content script から受け取ったジョブを同時実行数を絞って処理する。
- * MP3 は offscreen document でタグ・カバーを埋め込んでから保存、それ以外はそのまま保存。
+ * MP3 は offscreen document でタグ・カバーを埋め込んでから保存、ZIP は商品ごとにまとめて保存、
+ * それ以外はそのまま保存。
  */
 
 const CONCURRENCY = 2;
@@ -71,12 +72,14 @@ function updateKeepAlive() {
 
 // --- ジョブ処理 ---
 
-async function runJob(job) {
-  if (job.ext !== "mp3") return download(job.url, job.filename);
+async function runJob(job, tabId) {
+  if (job.ext !== "mp3" && job.ext !== "zip") return download(job.url, job.filename);
 
+  // mp3: タグ書き込み / zip: 商品内のMP3をタグ付けしてZIP化
   await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({ target: "offscreen", type: "tag", job });
-  if (!res || res.error) throw new Error(res?.error || "タグ書き込み失敗");
+  const type = job.ext === "zip" ? "zip" : "tag";
+  const res = await chrome.runtime.sendMessage({ target: "offscreen", type, job, tabId });
+  if (!res || res.error) throw new Error(res?.error || "ファイル作成失敗");
   return download(res.blobUrl, job.filename, res.blobUrl);
 }
 
@@ -92,7 +95,7 @@ function pump() {
   while (running < CONCURRENCY && queue.length > 0) {
     const { job, tabId } = queue.shift();
     running++;
-    runJob(job)
+    runJob(job, tabId)
       .then((ok) => {
         if (!ok) throw new Error("ダウンロード中断");
         progress.get(tabId).done++;
@@ -111,6 +114,11 @@ function pump() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // offscreen からのZIP作成進捗（何曲目まで処理したか）をタブへ中継
+  if (msg?.type === "hlo-zip-progress") {
+    chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {});
+    return;
+  }
   if (msg?.type !== "hlo-download") return;
   const tabId = sender.tab?.id;
   if (tabId == null || !Array.isArray(msg.jobs) || msg.jobs.length === 0) {

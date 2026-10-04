@@ -503,9 +503,11 @@
   const cardSyncs = new Map();
   let onSelectionChange = () => {};
   let onDownloadProgress = () => {};
+  let onZipProgress = () => {};
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === "hlo-progress") onDownloadProgress(msg);
+    if (msg?.type === "hlo-zip-progress") onZipProgress(msg);
   });
 
   function selectItem(href, checked) {
@@ -560,7 +562,7 @@
     }
   }
 
-  // format: "mp3" | "original"（WAV等の元ファイル） | "both"
+  // format: "mp3" | "original"（WAV等の元ファイル） | "both" | "zip"（商品ごとにMP3をZIP化）
   async function buildJobs(items, format, onProgress) {
     const jobs = [];
     for (let n = 0; n < items.length; n++) {
@@ -571,6 +573,7 @@
       const album = item.event;
       const year = item.publishedAt ? new Date(item.publishedAt).getFullYear() : item.year;
       const coverUrls = item.thumb ? [largeImageUrl(item.thumb), resolveUrl(item.thumb)] : [];
+      const zipEntries = [];
 
       tracks.forEach((track, i) => {
         if (!isTrackSelected(item.href, i) || !track.src) return;
@@ -588,6 +591,15 @@
           year,
         };
 
+        if (format === "zip") {
+          zipEntries.push({
+            url: resolveUrl(track.mp3Src),
+            name: `${nn} ${sanitizeFilename(title)}.mp3`,
+            tags,
+          });
+          return;
+        }
+
         const sources = [];
         if (format !== "original") sources.push({ url: track.mp3Src, ext: "mp3" });
         if (format !== "mp3" && track.ext !== "mp3") sources.push({ url: track.src, ext: track.ext });
@@ -602,6 +614,16 @@
           });
         }
       });
+
+      if (zipEntries.length > 0) {
+        // 同じ商品名でもメンバー違いで別購入があるため、見出し全文をZIP名にする
+        jobs.push({
+          ext: "zip",
+          filename: `holoshop/${sanitizeFilename(item.fullText || album)}.zip`,
+          entries: zipEntries,
+          coverUrls,
+        });
+      }
     }
     return jobs;
   }
@@ -916,6 +938,7 @@
       ["mp3", "MP3（タグ付き）"],
       ["original", "WAV（元ファイル）"],
       ["both", "MP3＋WAV"],
+      ["zip", "MP3（商品ごとZIP）"],
     ]) {
       const o = document.createElement("option");
       o.value = value;
@@ -943,7 +966,14 @@
       dlBtn.disabled = selection.size === 0;
     };
 
+    let lastProgress = null;
+    onZipProgress = (z) => {
+      if (!downloading || !lastProgress) return;
+      dlBtn.textContent = `ダウンロード中... ${lastProgress.done + lastProgress.failed}/${lastProgress.total}（ZIP作成 ${z.done}/${z.total}曲）`;
+    };
+
     onDownloadProgress = (p) => {
+      lastProgress = p;
       dlBtn.textContent = `ダウンロード中... ${p.done + p.failed}/${p.total}`;
       if (!p.finished) return;
       downloading = false;
@@ -957,6 +987,7 @@
 
     dlBtn.addEventListener("click", async () => {
       downloading = true;
+      lastProgress = null;
       dlBtn.disabled = true;
       try {
         const targets = allItems.filter((i) => selection.has(i.href));
