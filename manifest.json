@@ -1,8 +1,16 @@
 {
   "manifest_version": 3,
   "name": "holoshop-shelf",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "ホロライブショップのデジタルコンテンツライブラリーを整理・検索可能にする",
+  "permissions": ["downloads", "offscreen"],
+  "host_permissions": [
+    "https://d2z3u0bdyw6j8v.cloudfront.net/*",
+    "https://cdn.shopify.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://shop.hololivepro.com/apps/downloads/orders/*"],

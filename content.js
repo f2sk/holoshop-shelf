@@ -12,6 +12,7 @@
   const CACHE_KEY = "hlo_items_cache";
   const CACHE_TS_KEY = "hlo_items_cache_ts";
   const NAV_STATE_KEY = "hlo_nav_state";
+  const DL_FORMAT_KEY = "hlo_dl_format";
 
   // --- ユーティリティ ---
 
@@ -242,38 +243,71 @@
 
   const trackCache = new Map();
 
-  async function fetchTracks(detailUrl) {
-    if (trackCache.has(detailUrl)) return trackCache.get(detailUrl);
-    const resp = await fetch(detailUrl, { credentials: "include" });
+  const AUDIO_EXTS = ["wav", "mp3", "flac", "m4a", "ogg"];
+
+  // ショップ公式プレイヤー（hololive-skypilot-player.js）の「MP3 ファイル」メニューと同じ規則で
+  // 元ファイルの署名付きURLから MP3 変換配信URLを組み立てる
+  function mp3StreamUrl(src) {
+    if (!src) return "";
+    const url = new URL(src);
+    return `${url.origin}/stream${url.pathname.replace(/\.wav$/, ".mp3")}?key=${encodeURIComponent(src)}`;
+  }
+
+  // fresh: 署名付きURLの期限切れを避けるため、DL時はキャッシュを使わず取り直す
+  async function fetchTracks(detailUrl, { fresh = false } = {}) {
+    if (!fresh && trackCache.has(detailUrl)) return trackCache.get(detailUrl);
+    const result = [];
+    await collectTracks(detailUrl, result, new Set(), 0);
+    trackCache.set(detailUrl, result);
+    return result;
+  }
+
+  // フォルダ（「ボイス」等のコレクション）とページ送りを辿り、ページ上の並び順で音声を集める
+  async function collectTracks(url, result, visited, depth) {
+    if (visited.has(url) || depth > 3) return;
+    visited.add(url);
+
+    const resp = await fetch(url, { credentials: "include" });
     if (!resp.ok) {
-      console.error("[holoshop-shelf] トラック取得失敗:", resp.status, detailUrl);
-      return [];
+      console.error("[holoshop-shelf] トラック取得失敗:", resp.status, url);
+      return;
     }
     const html = await resp.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
-    const items = doc.querySelectorAll(".sky-pilot-list-item");
-    const result = Array.from(items)
-      .map((item) => {
-        const heading = item.querySelector(".sky-pilot-file-heading");
-        const audio = item.querySelector("audio");
-        const ext = item.querySelector("[class*='sky-pilot-file-extension']");
-        const isAudio = ext && ext.className.includes("wav") || ext && ext.className.includes("mp3");
-        if (!isAudio || !audio) return null;
 
-        let src = audio.getAttribute("src") || "";
-        if (!src) {
-          const source = audio.querySelector("source");
-          if (source) src = source.getAttribute("src") || "";
-        }
+    for (const item of doc.querySelectorAll(".sky-pilot-list-item")) {
+      if (item.querySelector(".sky-pilot-folder-wrapper")) {
+        const href = item.getAttribute("href");
+        if (href) await collectTracks(resolveUrl(href), result, visited, depth + 1);
+        continue;
+      }
+      const track = parseTrack(item);
+      if (track) result.push(track);
+    }
 
-        return {
-          title: heading ? heading.textContent.trim() : "",
-          src,
-        };
-      })
-      .filter(Boolean);
-    trackCache.set(detailUrl, result);
-    return result;
+    const nextUrl = getNextPageUrl(doc);
+    if (nextUrl) await collectTracks(nextUrl, result, visited, depth);
+  }
+
+  function parseTrack(item) {
+    const heading = item.querySelector(".sky-pilot-file-heading");
+    const audio = item.querySelector("audio");
+    const extEl = item.querySelector("[class*='sky-pilot-file-extension']");
+    const ext = extEl?.className.match(/sky-pilot-file-extension-(\w+)/)?.[1];
+    if (!AUDIO_EXTS.includes(ext) || !audio) return null;
+
+    let src = audio.getAttribute("src") || "";
+    if (!src) {
+      const source = audio.querySelector("source");
+      if (source) src = source.getAttribute("src") || "";
+    }
+
+    return {
+      title: heading ? heading.textContent.trim() : "",
+      src,
+      ext,
+      mp3Src: ext === "mp3" ? src : mp3StreamUrl(src),
+    };
   }
 
   // --- オーバーレイプレイヤー ---
@@ -461,6 +495,117 @@
     }
   }
 
+  // --- 一括ダウンロード ---
+
+  // href -> "all"（商品まるごと） | Set<トラックindex>
+  const selection = new Map();
+  // href -> 表示中カードのチェック状態を同期する関数
+  const cardSyncs = new Map();
+  let onSelectionChange = () => {};
+  let onDownloadProgress = () => {};
+
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type === "hlo-progress") onDownloadProgress(msg);
+  });
+
+  function selectItem(href, checked) {
+    if (checked) selection.set(href, "all");
+    else selection.delete(href);
+    cardSyncs.get(href)?.();
+    onSelectionChange();
+  }
+
+  function selectTrack(href, index, total, checked) {
+    const sel = selection.get(href);
+    const set = sel === "all" ? new Set(Array.from({ length: total }, (_, i) => i)) : new Set(sel || []);
+    if (checked) set.add(index);
+    else set.delete(index);
+
+    if (set.size === 0) selection.delete(href);
+    else if (set.size === total) selection.set(href, "all");
+    else selection.set(href, set);
+    cardSyncs.get(href)?.();
+    onSelectionChange();
+  }
+
+  function isTrackSelected(href, index) {
+    const sel = selection.get(href);
+    return sel === "all" || (sel instanceof Set && sel.has(index));
+  }
+
+  function resolveUrl(url) {
+    return new URL(url, window.location.origin).href;
+  }
+
+  function sanitizeFilename(name) {
+    const clean = name
+      .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+      .trim()
+      .slice(0, 120)
+      .replace(/[. ]+$/, "");
+    return clean || "untitled";
+  }
+
+  // サムネイルURLから大きいサイズの画像URLを作る（Shopify CDN の width 指定・サイズ接尾辞を外す）
+  function largeImageUrl(src) {
+    try {
+      const url = new URL(src, window.location.origin);
+      if (url.searchParams.has("width")) url.searchParams.set("width", "1000");
+      url.searchParams.delete("height");
+      url.searchParams.delete("crop");
+      url.pathname = url.pathname.replace(/_(\d+x\d*|\d*x\d+)(?=\.\w+$)/, "");
+      return url.href;
+    } catch (e) {
+      return src;
+    }
+  }
+
+  // format: "mp3" | "original"（WAV等の元ファイル） | "both"
+  async function buildJobs(items, format, onProgress) {
+    const jobs = [];
+    for (let n = 0; n < items.length; n++) {
+      const item = items[n];
+      if (onProgress) onProgress(n + 1, items.length);
+
+      const tracks = await fetchTracks(resolveUrl(item.href), { fresh: true });
+      const album = item.event;
+      const year = item.publishedAt ? new Date(item.publishedAt).getFullYear() : item.year;
+      const coverUrls = item.thumb ? [largeImageUrl(item.thumb), resolveUrl(item.thumb)] : [];
+
+      tracks.forEach((track, i) => {
+        if (!isTrackSelected(item.href, i) || !track.src) return;
+
+        // トラック番号は個別ページでの並び順
+        const no = i + 1;
+        const title = track.title.replace(/\.(wav|mp3|flac|m4a|ogg)$/i, "").trim();
+        const nn = String(no).padStart(Math.max(2, String(tracks.length).length), "0");
+        const tags = {
+          title,
+          album,
+          artist: item.memberClean || item.member,
+          track: no,
+          trackTotal: tracks.length,
+          year,
+        };
+
+        const sources = [];
+        if (format !== "original") sources.push({ url: track.mp3Src, ext: "mp3" });
+        if (format !== "mp3" && track.ext !== "mp3") sources.push({ url: track.src, ext: track.ext });
+
+        for (const { url, ext } of sources) {
+          jobs.push({
+            url: resolveUrl(url),
+            ext,
+            filename: `holoshop/${sanitizeFilename(album)}/${nn} ${sanitizeFilename(title)}.${ext}`,
+            tags,
+            coverUrls,
+          });
+        }
+      });
+    }
+    return jobs;
+  }
+
   // --- UI ---
 
   function createCard(item) {
@@ -503,7 +648,28 @@
     icons.appendChild(dlLink);
 
     thumbWrap.appendChild(icons);
+
+    // 左上チェックボックス（商品まるごと選択）
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "hlo-card-check";
+    check.title = "一括ダウンロードに追加";
+    check.addEventListener("click", (e) => e.stopPropagation());
+    check.addEventListener("change", () => selectItem(item.href, check.checked));
+    thumbWrap.appendChild(check);
+
     card.appendChild(thumbWrap);
+
+    const trackChecks = [];
+    function syncChecks() {
+      const sel = selection.get(item.href);
+      check.checked = sel === "all";
+      check.indeterminate = sel instanceof Set;
+      card.classList.toggle("hlo-card-selected", Boolean(sel));
+      trackChecks.forEach((c, i) => (c.checked = isTrackSelected(item.href, i)));
+    }
+    cardSyncs.set(item.href, syncChecks);
+    syncChecks();
 
     const body = document.createElement("div");
     body.className = "hlo-card-body";
@@ -567,6 +733,15 @@
           const row = document.createElement("div");
           row.className = "hlo-track";
 
+          const trackCheck = document.createElement("input");
+          trackCheck.type = "checkbox";
+          trackCheck.className = "hlo-track-check";
+          trackCheck.addEventListener("click", (e) => e.stopPropagation());
+          trackCheck.addEventListener("change", () =>
+            selectTrack(item.href, i, cardTracks.length, trackCheck.checked)
+          );
+          trackChecks.push(trackCheck);
+
           const playBtn = document.createElement("button");
           playBtn.className = "hlo-track-play";
           playBtn.textContent = "▶";
@@ -583,12 +758,14 @@
             loadTracksAndPlay(cardTracks, idx, rows);
           });
 
+          row.appendChild(trackCheck);
           row.appendChild(playBtn);
           row.appendChild(title);
           trackList.appendChild(row);
           rows.push(row);
         }
 
+        syncChecks();
         tracksLoaded = true;
       } else {
         trackList.style.display = "";
@@ -716,6 +893,94 @@
     });
     toolbar.appendChild(reloadBtn);
 
+    // 一括ダウンロード
+    let visibleItems = [];
+    let downloading = false;
+
+    function isAllVisibleSelected() {
+      return visibleItems.length > 0 && visibleItems.every((i) => selection.get(i.href) === "all");
+    }
+
+    const selectAllBtn = document.createElement("button");
+    selectAllBtn.className = "hlo-reload";
+    selectAllBtn.addEventListener("click", () => {
+      const next = !isAllVisibleSelected();
+      for (const item of visibleItems) selectItem(item.href, next);
+    });
+    toolbar.appendChild(selectAllBtn);
+
+    const formatSelect = document.createElement("select");
+    formatSelect.className = "hlo-sort";
+    formatSelect.title = "ダウンロード形式";
+    for (const [value, label] of [
+      ["mp3", "MP3（タグ付き）"],
+      ["original", "WAV（元ファイル）"],
+      ["both", "MP3＋WAV"],
+    ]) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = label;
+      formatSelect.appendChild(o);
+    }
+    formatSelect.value = localStorage.getItem(DL_FORMAT_KEY) || "mp3";
+    formatSelect.addEventListener("change", () => localStorage.setItem(DL_FORMAT_KEY, formatSelect.value));
+    toolbar.appendChild(formatSelect);
+
+    const dlBtn = document.createElement("button");
+    dlBtn.className = "hlo-reload hlo-dl";
+    toolbar.appendChild(dlBtn);
+
+    function showStatus(text, ms = 3000) {
+      statusEl.textContent = text;
+      statusEl.style.display = "";
+      setTimeout(() => (statusEl.style.display = "none"), ms);
+    }
+
+    onSelectionChange = () => {
+      selectAllBtn.textContent = isAllVisibleSelected() ? "☐ 表示中を選択解除" : "☑ 表示中を全選択";
+      if (downloading) return;
+      dlBtn.textContent = `⬇ 選択をDL（${selection.size}件）`;
+      dlBtn.disabled = selection.size === 0;
+    };
+
+    onDownloadProgress = (p) => {
+      dlBtn.textContent = `ダウンロード中... ${p.done + p.failed}/${p.total}`;
+      if (!p.finished) return;
+      downloading = false;
+      if (p.failed > 0) {
+        showStatus(`${p.done}件保存・${p.failed}件失敗（詳細は拡張機能のService Workerのコンソール）`, 8000);
+      } else {
+        showStatus(`${p.done}件を保存しました`);
+      }
+      onSelectionChange();
+    };
+
+    dlBtn.addEventListener("click", async () => {
+      downloading = true;
+      dlBtn.disabled = true;
+      try {
+        const targets = allItems.filter((i) => selection.has(i.href));
+        const jobs = await buildJobs(targets, formatSelect.value, (n, total) => {
+          dlBtn.textContent = `トラック情報取得中... ${n}/${total}`;
+        });
+        if (jobs.length === 0) {
+          downloading = false;
+          showStatus("ダウンロードできる音声が見つかりませんでした");
+          onSelectionChange();
+          return;
+        }
+        const res = await chrome.runtime.sendMessage({ type: "hlo-download", jobs });
+        if (!res?.accepted) throw new Error("バックグラウンドが受け付けませんでした");
+        selection.clear();
+        for (const sync of cardSyncs.values()) sync();
+      } catch (e) {
+        console.error("[holoshop-shelf] 一括DL失敗:", e);
+        downloading = false;
+        showStatus("一括ダウンロードを開始できませんでした（ページを再読み込みしてください）", 8000);
+        onSelectionChange();
+      }
+    });
+
     const count = document.createElement("span");
     count.className = "hlo-count";
     toolbar.appendChild(count);
@@ -768,9 +1033,12 @@
       }
 
       grid.innerHTML = "";
+      cardSyncs.clear();
       for (const item of filtered) {
         grid.appendChild(createCard(item));
       }
+      visibleItems = filtered;
+      onSelectionChange();
 
       count.textContent = `${filtered.length} / ${allItems.length} 件`;
     }

@@ -423,3 +423,46 @@
   background: #35b5c0;
   cursor: pointer;
 }
+
+/* --- 一括ダウンロード --- */
+
+.hlo-card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: #35b5c0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.hlo-card:hover .hlo-card-check,
+.hlo-card-check:checked,
+.hlo-card-check:indeterminate {
+  opacity: 1;
+}
+
+.hlo-card-selected {
+  border-color: #35b5c0;
+}
+
+.hlo-track-check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #35b5c0;
+  cursor: pointer;
+}
+
+.hlo-dl:not(:disabled) {
+  background: #35b5c0;
+  color: #fff;
+}
+
+.hlo-dl:not(:disabled):hover {
+  background: #2a9da7;
+}
